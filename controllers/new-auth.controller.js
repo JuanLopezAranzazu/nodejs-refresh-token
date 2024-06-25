@@ -4,8 +4,12 @@ const bcrypt = require("bcrypt");
 // models
 const User = require("../models/user.model");
 const Role = require("../models/role.model");
-// almacenar los tokens
-let refreshTokens = []; // poco optimo
+const RefreshToken = require("../models/refreshToken.model");
+// utils
+const {
+  saveRefreshToken,
+  validateRefreshToken,
+} = require("../utils/refreshToken");
 
 const registerUser = async (req, res, next) => {
   try {
@@ -56,48 +60,56 @@ const userLogin = async (req, res, next) => {
     }
     // generar token
     const roles = foundUser.roles.map((role) => role.name);
-    const user = { userId: foundUser._id, roles };
-    // generar token
+    const user = { userId: foundUser._id };
+
     const accessToken = jwt.sign(user, config.secretKey, {
       expiresIn: config.jwtExpirationTime,
     });
-    // generar refreshToken
-    const refreshToken = jwt.sign(user, config.refreshSecretKey, {
-      expiresIn: config.jwtRefreshExpirationTime,
-    });
 
-    // almacenar el token
-    refreshTokens.push(refreshToken);
-
-    res.status(200).json({ accessToken, refreshToken });
+    // guardar refreshToken en la base de datos
+    const refreshToken = await saveRefreshToken(user.userId);
+    console.log(refreshToken);
+    res
+      .status(200)
+      .json({ accessToken, refreshToken: refreshToken.token, roles });
   } catch (error) {
     next(error);
   }
 };
 
-const token = (req, res, next) => {
+const token = async (req, res, next) => {
   try {
     const { body } = req;
     const { refreshToken } = body;
     console.log(refreshToken);
     // verificar si el token existe
-    if (!refreshToken)
-      return res.status(401).json({ message: "No hay token"});
-    if (!refreshTokens.includes(refreshToken))
-      return res.status(403).json({ message: "Acceso denegado" });
-    console.log(refreshTokens);
-    // verificar si el token es valido
-    jwt.verify(refreshToken, config.refreshSecretKey, (err, user) => {
-      if (err) return res.status(403).json({ message: "Acceso denegado" });
-      // generar nuevo token
-      const accessToken = jwt.sign(
-        { userId: user.userId, roles: user.roles },
-        config.secretKey,
-        {
-          expiresIn: config.jwtExpirationTime,
-        }
-      );
-      res.status(200).json({ accessToken });
+    if (!refreshToken) return res.status(401).json({ message: "No hay token" });
+    // verificar si el token existe en la base de datos
+    const foundRefreshToken = await RefreshToken.findOne({
+      token: refreshToken,
+    });
+    if (!foundRefreshToken) {
+      res.status(403).json({ message: "El token no esta en la base de datos" });
+      return;
+    }
+    console.log(foundRefreshToken);
+    // verificar si el token ha expirado
+    if (validateRefreshToken(foundRefreshToken)) {
+      RefreshToken.findByIdAndDelete(foundRefreshToken._id, {
+        useFindAndModify: false,
+      }).exec();
+      res.status(403).json({ message: "El token ha expirado" });
+      return;
+    }
+    // generar nuevo token
+    const user = { userId: foundRefreshToken.userId };
+    const newAccessToken = jwt.sign(user, config.secretKey, {
+      expiresIn: config.jwtExpirationTime,
+    });
+
+    return res.status(200).json({
+      accessToken: newAccessToken,
+      refreshToken: foundRefreshToken.token,
     });
   } catch (error) {
     next(error);
